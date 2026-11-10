@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import re
 import uuid
+from importlib.metadata import PackageNotFoundError, version
 from typing import AsyncIterator, List, Optional
 from google import genai
 from google.genai import types
@@ -9,6 +11,29 @@ from backend.config import DEFAULT_LIVE_VOICE, resolve_live_voice_name, settings
 from backend.providers.base import LiveModelProvider, ModelEvent, ModelEventType
 
 logger = logging.getLogger("gemini_live")
+
+
+def _upstream_rejection_details(error: Exception) -> str:
+    """Expose safe HTTP rejection details without logging request URLs or keys."""
+    response = getattr(error, "response", None) or getattr(error, "http_response", None)
+    if response is None:
+        return ""
+
+    details = []
+    status = getattr(response, "status_code", None) or getattr(response, "status", None)
+    reason = getattr(response, "reason_phrase", None)
+    if status is not None:
+        details.append(f"upstream_status={status}")
+    if reason:
+        details.append(f"upstream_reason={str(reason)[:120]}")
+
+    body = getattr(response, "body", None)
+    if isinstance(body, bytes):
+        body = body.decode("utf-8", errors="replace")
+    if body:
+        body = re.sub(r"(?i)(api[_ -]?key|key)[\"'=:\s]+[^\"'\s,}]+", r"\1=[REDACTED]", str(body))
+        details.append(f"upstream_body={body.strip()[:800]!r}")
+    return " " + " ".join(details) if details else ""
 
 
 def build_live_connect_config(system_instruction: str, voice_name: Optional[str] = None):
@@ -71,6 +96,11 @@ class GeminiLiveProvider(LiveModelProvider):
 
         # Initialize official GenAI client
         self._client = genai.Client(api_key=self.api_key)
+        try:
+            sdk_version = version("google-genai")
+        except PackageNotFoundError:
+            sdk_version = "unknown"
+        logger.info("Gemini Live client initialized (google-genai=%s)", sdk_version)
 
         # Build LiveConnectConfig with native audio modalities & transcription.
         live_config = build_live_connect_config(instruction, voice)
@@ -116,8 +146,8 @@ class GeminiLiveProvider(LiveModelProvider):
                     is_transient = "503" in err_str or "UNAVAILABLE" in err_str or "high demand" in err_str or "429" in err_str
 
                     logger.warning(
-                        "Connection attempt to model %s failed (transient=%s): %s",
-                        current_model, is_transient, err_str
+                        "Connection attempt to model %s failed (transient=%s): %s%s",
+                        current_model, is_transient, err_str, _upstream_rejection_details(e)
                     )
 
                     if self._session_context:

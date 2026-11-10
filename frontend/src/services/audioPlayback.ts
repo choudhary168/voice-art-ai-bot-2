@@ -28,6 +28,11 @@ export class AudioPlaybackService {
     }
   }
 
+  /** Call from a user gesture so later streamed audio can play automatically. */
+  public unlock(): void {
+    this.initContext();
+  }
+
   public setCallbacks(
     onStateChange: (isPlaying: boolean) => void,
     onLevel: (rms: number) => void

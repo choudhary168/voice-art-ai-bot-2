@@ -1,10 +1,12 @@
 import logging
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Dict, List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from starlette.staticfiles import StaticFiles
 import uvicorn
 
 from backend.api.websocket import router as websocket_router
@@ -29,9 +31,20 @@ async def lifespan(app: FastAPI):
     logger.info("Model: %s | Voice: %s | API Key Configured: %s",
                 settings.gemini_model, settings.voice_name, settings.has_api_key)
     logger.info("Allowed CORS Origins: %s", settings.cors_origins)
+    from backend.database.connection import check_database, close_database
+    from backend.services.persistence import persistence_queue
+    ready = await check_database()
+    if ready:
+        persistence_queue.start()
+        await get_knowledge_provider().load_persisted_documents()
+        logger.info("PostgreSQL persistence ready")
+    elif settings.database_enabled:
+        logger.warning("PostgreSQL unavailable; voice service is running in degraded persistence mode")
     yield
     logger.info("Shutting down backend and terminating all active sessions...")
     await session_manager.cleanup_all()
+    await persistence_queue.stop()
+    await close_database()
     logger.info("All sessions terminated cleanly.")
 
 
@@ -66,6 +79,7 @@ class HealthResponse(BaseModel):
     active_sessions: int
     audio_input_rate: int
     audio_output_rate: int
+    persistence_status: str = "disabled"
 
 
 class AddDocumentRequest(BaseModel):
@@ -76,8 +90,9 @@ class AddDocumentRequest(BaseModel):
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Health check endpoint exposing runtime diagnostics and model readiness."""
+    """Liveness endpoint for the running HTTP and WebSocket service."""
     active_count = len(session_manager._sessions)
+    from backend.database import connection as database_connection
     return HealthResponse(
         status="healthy",
         uptime_seconds=round(time.time() - start_time, 2),
@@ -86,8 +101,19 @@ async def health_check():
         has_api_key=settings.has_api_key,
         active_sessions=active_count,
         audio_input_rate=settings.input_sample_rate,
-        audio_output_rate=settings.output_sample_rate
+        audio_output_rate=settings.output_sample_rate,
+        persistence_status=("ready" if database_connection.database_ready else ("degraded" if settings.database_enabled else "disabled"))
     )
+
+
+@app.get("/ready")
+async def readiness_check():
+    """Readiness endpoint that includes the configured persistence dependency."""
+    if settings.database_enabled:
+        from backend.database import connection as database_connection
+        if not database_connection.database_ready:
+            raise HTTPException(status_code=503, detail="Database persistence is unavailable")
+    return {"status": "ready"}
 
 
 @app.post("/api/knowledge")
@@ -110,6 +136,13 @@ async def get_knowledge_overview():
         "count": len(docs),
         "documents": [{"title": d.title, "source": d.source, "excerpt": d.content[:100]} for d in docs]
     }
+
+
+# The Render image includes the built React app. Keeping this mount last leaves
+# all existing REST and WebSocket routes unchanged and serves the UI same-origin.
+frontend_dist = Path(__file__).resolve().parents[1] / "frontend" / "dist"
+if frontend_dist.is_dir():
+    app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
 
 
 if __name__ == "__main__":

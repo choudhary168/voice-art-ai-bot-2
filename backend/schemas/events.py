@@ -1,7 +1,8 @@
 import time
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from backend.config import resolve_live_voice_name
 
 
 class ClientEventType(str, Enum):
@@ -30,6 +31,13 @@ class SessionStartPayload(BaseModel):
     system_instruction: Optional[str] = None
     voice_name: Optional[str] = None
     client_timestamp: float = Field(default_factory=time.time)
+
+    @field_validator("voice_name", mode="before")
+    @classmethod
+    def validate_voice_name(cls, value: object) -> Optional[str]:
+        if value is None:
+            return None
+        return resolve_live_voice_name(value)
 
 
 class AudioChunkPayload(BaseModel):

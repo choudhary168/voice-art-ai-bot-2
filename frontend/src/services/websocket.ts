@@ -2,6 +2,40 @@ import { ClientEventType, ServerEvent, ServerEventType } from '../types/events';
 
 type EventHandler = (event: ServerEvent) => void;
 
+export function getDefaultWebSocketUrl(): string {
+  // 1. Explicit Vite environment variable (e.g. VITE_WS_URL=wss://api.example.com/ws/live)
+  const envWsUrl = import.meta.env.VITE_WS_URL;
+  if (envWsUrl && typeof envWsUrl === 'string') {
+    return envWsUrl;
+  }
+
+  // An explicit REST API origin also identifies the backend for split deployments.
+  const envApiUrl = import.meta.env.VITE_API_URL;
+  if (envApiUrl && typeof envApiUrl === 'string') {
+    const apiUrl = new URL(envApiUrl);
+    const wsProtocol = apiUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${wsProtocol}//${apiUrl.host}/ws/live`;
+  }
+
+  // 2. Derive automatically from current window location
+  if (typeof window !== 'undefined' && window.location) {
+    const loc = window.location;
+    const isSecure = loc.protocol === 'https:';
+    const wsProtocol = isSecure ? 'wss:' : 'ws:';
+    const host = loc.hostname || 'localhost';
+
+    // In local development, default backend runs on port 8000
+    if (host === 'localhost' || host === '127.0.0.1') {
+      return `${wsProtocol}//${host}:8000/ws/live`;
+    }
+
+    // In production, connect through host directly
+    return `${wsProtocol}//${loc.host}/ws/live`;
+  }
+
+  return 'ws://localhost:8000/ws/live';
+}
+
 export class WebSocketClient {
   private ws: WebSocket | null = null;
   private url: string = '';
@@ -9,13 +43,7 @@ export class WebSocketClient {
   private reconnectTimer: number | null = null;
 
   constructor(defaultUrl?: string) {
-    if (defaultUrl) {
-      this.url = defaultUrl;
-    } else {
-      const loc = window.location;
-      const host = loc.hostname || 'localhost';
-      this.url = `ws://${host}:8000/ws/live`;
-    }
+    this.url = defaultUrl || getDefaultWebSocketUrl();
   }
 
   public get isConnected(): boolean {
@@ -25,6 +53,8 @@ export class WebSocketClient {
   public connect(customUrl?: string): Promise<void> {
     if (customUrl) {
       this.url = customUrl;
+    } else if (!this.url) {
+      this.url = getDefaultWebSocketUrl();
     }
 
     return new Promise((resolve, reject) => {

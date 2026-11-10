@@ -1,0 +1,2 @@
+# Root requirements proxy pointing to backend dependencies
+-r backend/requirements.txt

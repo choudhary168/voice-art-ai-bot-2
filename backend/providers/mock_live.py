@@ -3,6 +3,9 @@ import uuid
 from typing import AsyncIterator, Optional
 from backend.providers.base import LiveModelProvider, ModelEvent, ModelEventType
 
+INITIAL_GREETING_REQUEST = "Start the conversation now."
+INITIAL_GREETING = "Namaste! Aapka swagat hai. Bataiye, main aapki kya help kar sakti hoon?"
+
 
 class MockModelProvider(LiveModelProvider):
     """
@@ -50,6 +53,9 @@ class MockModelProvider(LiveModelProvider):
 
     async def send_text(self, text: str, end_of_turn: bool = True) -> None:
         if not self._connected:
+            return
+        if text.startswith(INITIAL_GREETING_REQUEST):
+            await self._generate_simulated_turn(INITIAL_GREETING)
             return
         await self._generate_simulated_turn(f"You asked: {text}. Here is the answer.")
 

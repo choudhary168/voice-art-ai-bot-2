@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { audioCaptureService } from '../services/audioCapture';
 import { audioPlaybackService } from '../services/audioPlayback';
 import { wsService } from '../services/websocket';
+import { LiveVoiceName, loadVoicePreference, saveVoicePreference } from '../config/voices';
 import {
   ChatMessage,
   ConnectionState,
@@ -24,6 +25,7 @@ export function useVoiceAgent() {
   const [agentAudioLevel, setAgentAudioLevel] = useState<number>(0);
   const [latencyMetrics, setLatencyMetrics] = useState<LatencyMetrics | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [selectedVoice, setSelectedVoice] = useState<LiveVoiceName>(() => loadVoicePreference());
 
   // Reference to keep track of active turn without state closure staleness
   const currentTurnIdRef = useRef<string | null>(null);
@@ -164,6 +166,9 @@ export function useVoiceAgent() {
     try {
       setConnectionState('connecting');
       setErrorMessage(null);
+      // The greeting is streamed after session setup; initialize Web Audio while
+      // this connect call is still running from the user's click gesture.
+      audioPlaybackService.unlock();
       await wsService.connect();
 
       // Wait until the backend has finished opening the Gemini Live session.
@@ -189,7 +194,7 @@ export function useVoiceAgent() {
       // Emit session.start
       wsService.send('session.start', {
         system_instruction: systemInstruction,
-        voice_name: voiceName,
+        voice_name: voiceName ?? selectedVoice,
         client_timestamp: Date.now() / 1000,
       });
       await sessionReady;
@@ -203,6 +208,10 @@ export function useVoiceAgent() {
       if (readyTimer !== undefined) window.clearTimeout(readyTimer);
       unbind?.();
     }
+  }, [selectedVoice]);
+
+  const updateSelectedVoice = useCallback((voice: LiveVoiceName) => {
+    setSelectedVoice(saveVoicePreference(voice));
   }, []);
 
   // Disconnect session
@@ -305,6 +314,8 @@ export function useVoiceAgent() {
     agentAudioLevel,
     latencyMetrics,
     errorMessage,
+    selectedVoice,
+    setSelectedVoice: updateSelectedVoice,
     connect,
     disconnect,
     toggleVoiceMode,

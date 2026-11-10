@@ -134,6 +134,8 @@ gemini-voice-agent/
 
 ---
 
+`session.start.voice_name` is optional for backward compatibility. The backend accepts only Google's documented Gemini Live prebuilt voices (case-sensitive), and uses `Puck` when the field is missing or unsupported. The frontend stores the selected voice in this browser's local storage. Changing it during an active session saves it for the next session; Gemini Live voice selection is part of session setup and is not switched mid-session. See Google's [Live API voice configuration](https://ai.google.dev/gemini-api/docs/live-api/capabilities) and [prebuilt voice catalog](https://ai.google.dev/gemini-api/docs/speech-generation).
+
 ## Setup and Run Instructions (Windows PowerShell)
 
 ### Prerequisites
@@ -158,6 +160,11 @@ gemini-voice-agent/
    PORT=8000
    ```
    *(Note: If `GEMINI_API_KEY` is not provided, the backend automatically runs in offline mock mode, allowing full UI and audio pipeline verification without crashing).*
+
+3. Install backend dependencies:
+   ```powershell
+   pip install -r backend/requirements.txt
+   ```
 
 ---
 
@@ -254,6 +261,44 @@ Open your browser at:
 - The agent references the injected context dynamically!
 
 ---
+
+## Troubleshooting & FAQ
+
+## Optional PostgreSQL persistence
+
+Persistence is enabled by default but remains best effort: if PostgreSQL is unavailable, the voice service starts in degraded mode and audio conversations continue. Final transcript writes use a bounded background queue. Anonymous WebSocket identities are server-generated per connection in this version; they are not account authentication and do not yet provide cross-connection history ownership. The public `/api/knowledge` endpoints retain their existing behavior. User, preference, feedback, and administrative analytics REST APIs are not exposed until an authentication and authorization policy is configured.
+
+Install PostgreSQL on Windows (for example, with the official installer), then in `psql`:
+
+```sql
+CREATE USER gemini_voice_agent WITH PASSWORD 'choose-a-local-password';
+CREATE DATABASE gemini_voice_agent OWNER gemini_voice_agent;
+```
+
+Copy `backend/.env.example` to `backend/.env` and set `DATABASE_URL` to the local credentials, e.g. `postgresql+asyncpg://gemini_voice_agent:your-password@localhost:5432/gemini_voice_agent`. Keep credentials out of source control. Install dependencies and apply the explicit migration from the project root:
+
+```powershell
+python -m pip install -r backend/requirements.txt
+$env:DATABASE_URL = "postgresql+asyncpg://gemini_voice_agent:your-password@localhost:5432/gemini_voice_agent"
+python -m alembic -c alembic.ini upgrade head
+```
+
+To revert the initial schema (this drops the tables and their contents), run `python -m alembic -c alembic.ini downgrade base`. Start services using the backend and frontend commands above. `/health` includes `persistence_status` (`ready`, `degraded`, or `disabled`). Existing endpoints remain `GET /health`, `GET /api/knowledge`, and `POST /api/knowledge`; user history and feedback routes are intentionally not public in this release because the baseline has no authentication system.
+
+The database stores finalized transcript text, not audio. A full retry queue or process restart cannot guarantee delivery once an event has been logged as dropped or failed; monitor structured `Persistence queue full` and `Persistence event failed` records and the in-process dropped/failed counters.
+
+## Deploy on Render
+
+The repository includes a Render Blueprint and a multi-stage Dockerfile. The single web service serves the compiled React app and FastAPI endpoints on the same HTTPS origin, including the secure `/ws/live` WebSocket, and provisions PostgreSQL. This keeps the voice and text session workflow unchanged and avoids separate frontend CORS and URL wiring.
+
+1. Push this repository to GitHub and connect it to Render.
+2. In Render, create a Blueprint from the repository's `render.yaml` and apply it.
+3. Set `GEMINI_API_KEY` for the `gemini-voice-agent` service in the Render Dashboard. The Blueprint intentionally leaves this secret unsynchronized.
+4. Wait for the image build and deploy. The container applies `alembic upgrade head` before starting Uvicorn. If PostgreSQL is unavailable, it logs a migration warning and preserves the existing degraded-persistence startup behavior. Confirm `/health` returns `status: healthy` and `persistence_status: ready`; `/ready` returns HTTP 503 if enabled database persistence is unavailable.
+
+The Blueprint selects Render's free web and PostgreSQL plans to avoid creating billable services unexpectedly. Those plans are suitable for a preview, not production: free web services can sleep, and free PostgreSQL databases expire after 30 days. Upgrade both plans in Render before relying on persistent conversations or uninterrupted voice sessions. See [Render's free plan limitations](https://render.com/docs/free).
+
+The Render web service uses `/health` as its liveness check so a database outage does not cause an endless service restart loop. The `/ready` endpoint separately reports database dependency readiness.
 
 ## Troubleshooting & FAQ
 

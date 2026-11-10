@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: gemini-voice-agent
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    maxShutdownDelaySeconds: 120
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: gemini-voice-agent-db
+          property: connectionString
+      - key: DATABASE_ENABLED
+        value: "true"
+      - key: ANONYMOUS_TOKEN_SECRET
+        generateValue: true
+
+databases:
+  - name: gemini-voice-agent-db
+    databaseName: gemini_voice_agent
+    user: gemini_voice_agent
+    plan: free
+    region: singapore
+    postgresMajorVersion: "18"

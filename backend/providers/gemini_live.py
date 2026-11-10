@@ -5,10 +5,28 @@ from typing import AsyncIterator, List, Optional
 from google import genai
 from google.genai import types
 
-from backend.config import settings
+from backend.config import DEFAULT_LIVE_VOICE, resolve_live_voice_name, settings
 from backend.providers.base import LiveModelProvider, ModelEvent, ModelEventType
 
 logger = logging.getLogger("gemini_live")
+
+
+def build_live_connect_config(system_instruction: str, voice_name: Optional[str] = None):
+    """Build the audio Live API setup with a validated prebuilt voice."""
+    voice = resolve_live_voice_name(voice_name)
+    return types.LiveConnectConfig(
+        response_modalities=["AUDIO"],
+        speech_config=types.SpeechConfig(
+            voice_config=types.VoiceConfig(
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)
+            )
+        ),
+        system_instruction=types.Content(
+            parts=[types.Part.from_text(text=system_instruction)]
+        ),
+        input_audio_transcription=types.AudioTranscriptionConfig(),
+        output_audio_transcription=types.AudioTranscriptionConfig(),
+    )
 
 
 class GeminiLiveProvider(LiveModelProvider):
@@ -46,7 +64,7 @@ class GeminiLiveProvider(LiveModelProvider):
                 "Please configure a valid GEMINI_API_KEY in backend/.env"
             )
 
-        voice = voice_name or settings.voice_name
+        voice = resolve_live_voice_name(voice_name or DEFAULT_LIVE_VOICE)
         instruction = system_instruction or settings.default_system_instruction
         self._voice_name = voice
         self._system_instruction = instruction
@@ -54,20 +72,8 @@ class GeminiLiveProvider(LiveModelProvider):
         # Initialize official GenAI client
         self._client = genai.Client(api_key=self.api_key)
 
-        # Build LiveConnectConfig with native audio modalities & transcription
-        live_config = types.LiveConnectConfig(
-            response_modalities=["AUDIO"],
-            speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)
-                )
-            ),
-            system_instruction=types.Content(
-                parts=[types.Part.from_text(text=instruction)]
-            ),
-            input_audio_transcription=types.AudioTranscriptionConfig(),
-            output_audio_transcription=types.AudioTranscriptionConfig(),
-        )
+        # Build LiveConnectConfig with native audio modalities & transcription.
+        live_config = build_live_connect_config(instruction, voice)
 
         # Candidate models to try in order
         candidate_models: List[str] = [self.model_id]

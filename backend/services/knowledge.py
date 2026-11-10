@@ -91,8 +91,12 @@ class DefaultKnowledgeProvider(KnowledgeProvider):
         matched: List[KnowledgeSnippet] = []
         query_lower = query.lower() if query else ""
 
+        # Database-backed documents are loaded during startup and cached so
+        # retrieval never puts SQL on the live session or typed-turn path.
+        docs = self._documents
+
         # Simple semantic/keyword match for initial store; easily replaced with vector DB / RAG
-        for doc in self._documents:
+        for doc in docs:
             words = [w for w in doc.title.lower().split() if len(w) > 3]
             if any(w in query_lower for w in words):
                 matched.append(doc)
@@ -106,9 +110,42 @@ class DefaultKnowledgeProvider(KnowledgeProvider):
 
     async def add_document(self, title: str, content: str, source: Optional[str] = None) -> None:
         self._documents.append(KnowledgeSnippet(title=title, content=content, source=source))
+        try:
+            from backend.database.connection import SessionFactory, database_ready
+            from backend.database.models import KnowledgeDocument
+            from sqlalchemy import select
+            if database_ready:
+                async with SessionFactory() as session:
+                    exists = await session.scalar(select(KnowledgeDocument.id).where(
+                        KnowledgeDocument.title == title, KnowledgeDocument.source == source
+                    ).limit(1))
+                    if exists is None:
+                        session.add(KnowledgeDocument(title=title, content=content, source=source))
+                        await session.commit()
+        except Exception:
+            # Preserve runtime knowledge functionality during database outages.
+            import logging
+            logging.getLogger(__name__).exception("Knowledge document persistence failed")
 
     def set_user_profile(self, profile: UserProfile) -> None:
         self._profiles[profile.user_id] = profile
+
+    async def load_persisted_documents(self) -> None:
+        try:
+            from backend.database.connection import SessionFactory, database_ready
+            from backend.database.models import KnowledgeDocument
+            from sqlalchemy import select
+            if not database_ready:
+                return
+            async with SessionFactory() as session:
+                rows = (await session.scalars(select(KnowledgeDocument).where(KnowledgeDocument.is_active.is_(True)))).all()
+            by_key = {(d.title, d.source): d for d in self._documents}
+            for row in rows:
+                by_key[(row.title, row.source)] = KnowledgeSnippet(title=row.title, content=row.content, source=row.source)
+            self._documents = list(by_key.values())
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception("Could not load persisted knowledge; using in-memory seed")
 
 
 # Global singleton instance

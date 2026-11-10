@@ -3,6 +3,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from backend.main import app
+from backend.config import settings
 
 
 def test_health_endpoint():
@@ -33,7 +34,10 @@ def test_knowledge_rest_endpoints():
     assert any(d["title"] == "Refund Policy" for d in res2.json()["documents"])
 
 
-def test_websocket_text_and_audio_flow():
+def test_websocket_text_and_audio_flow(monkeypatch):
+    # Keep websocket tests deterministic and never make a paid Live API call,
+    # even when a developer has credentials in backend/.env.
+    monkeypatch.setattr(settings, "gemini_api_key", "")
     client = TestClient(app)
     with client.websocket_connect("/ws/live") as ws:
         # 1. Send session.start
@@ -50,6 +54,21 @@ def test_websocket_text_and_audio_flow():
         assert msg1["type"] == "session.ready"
         assert msg1["payload"]["model"]
         assert msg1["payload"]["output_sample_rate"] == 24000
+
+        # The agent greets immediately after session setup, without user input.
+        greeting_events = []
+        while True:
+            event = json.loads(ws.receive_text())
+            greeting_events.append(event)
+            if event["type"] == "response.completed":
+                break
+        greeting_text = " ".join(
+            event["payload"]["text"]
+            for event in greeting_events
+            if event["type"] == "transcript.output"
+        )
+        assert "Namaste!" in greeting_text
+        assert any(event["type"] == "audio.chunk" for event in greeting_events)
 
         # 2. Send text message
         ws.send_text(json.dumps({

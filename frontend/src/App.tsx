@@ -6,6 +6,22 @@ import { AudioPlayer } from './components/AudioPlayer';
 import { VoiceControls } from './components/VoiceControls';
 import { ChatMessages } from './components/ChatMessages';
 import { LatencyDiagnostics } from './components/LatencyDiagnostics';
+import { VoiceSettings } from './components/VoiceSettings';
+
+function getApiBaseUrl(): string {
+  const envApiUrl = import.meta.env.VITE_API_URL;
+  if (envApiUrl && typeof envApiUrl === 'string') {
+    return envApiUrl.replace(/\/$/, '');
+  }
+  if (typeof window !== 'undefined' && window.location) {
+    const loc = window.location;
+    if (loc.hostname === 'localhost' || loc.hostname === '127.0.0.1') {
+      return `${loc.protocol}//${loc.hostname}:8000`;
+    }
+    return loc.origin;
+  }
+  return 'http://localhost:8000';
+}
 
 export const App: React.FC = () => {
   const {
@@ -19,6 +35,8 @@ export const App: React.FC = () => {
     agentAudioLevel,
     latencyMetrics,
     errorMessage,
+    selectedVoice,
+    setSelectedVoice,
     connect,
     disconnect,
     toggleVoiceMode,
@@ -38,7 +56,8 @@ export const App: React.FC = () => {
     if (!docTitle.trim() || !docContent.trim()) return;
 
     try {
-      const res = await fetch('http://localhost:8000/api/knowledge', {
+      const apiBase = getApiBaseUrl();
+      const res = await fetch(`${apiBase}/api/knowledge`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -127,6 +146,11 @@ export const App: React.FC = () => {
       <main className="main-grid">
         {/* Left: Chat Transcript and Controls */}
         <div className="chat-column">
+          <VoiceSettings
+            selectedVoice={selectedVoice}
+            isConnected={connectionState === 'connected'}
+            onVoiceChange={setSelectedVoice}
+          />
           <ChatMessages
             messages={messages}
             onClear={clearChat}

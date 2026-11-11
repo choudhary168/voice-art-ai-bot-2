@@ -62,7 +62,8 @@ class GeminiLiveProvider(LiveModelProvider):
     to withstand transient 503 UNAVAILABLE / high demand spikes.
     """
 
-    FALLBACK_MODELS = ["gemini-3.8-live", "gemini-3.1-flash-live-preview"]
+    # Strictly configured for Gemini 3.8 Live
+    FALLBACK_MODELS = ["gemini-3.8-live"]
 
     def __init__(self, model_id: Optional[str] = None, api_key: Optional[str] = None):
         self.model_id = model_id or settings.gemini_model
@@ -94,76 +95,95 @@ class GeminiLiveProvider(LiveModelProvider):
         self._voice_name = voice
         self._system_instruction = instruction
 
-        # Initialize official GenAI client
-        self._client = genai.Client(api_key=self.api_key)
         try:
             sdk_version = version("google-genai")
         except PackageNotFoundError:
             sdk_version = "unknown"
-        logger.info("Gemini Live client initialized (google-genai=%s)", sdk_version)
+        logger.info("Initializing Gemini Live connection (google-genai=%s)", sdk_version)
 
         # Build LiveConnectConfig with native audio modalities & transcription.
         live_config = build_live_connect_config(instruction, voice)
 
+        # Candidate API versions: v1beta is required for Live API BidiGenerateContent
+        preferred_api_version = getattr(settings, "gemini_api_version", "v1beta") or "v1beta"
+        candidate_api_versions: List[str] = [preferred_api_version]
+        for v in ["v1beta", "v1alpha"]:
+            if v not in candidate_api_versions:
+                candidate_api_versions.append(v)
+
         # Candidate models to try in order
-        candidate_models: List[str] = [self.model_id]
+        candidate_models: List[str] = []
+        if self.model_id:
+            candidate_models.append(self.model_id)
         for fallback in self.FALLBACK_MODELS:
             if fallback not in candidate_models:
                 candidate_models.append(fallback)
 
         last_error: Optional[Exception] = None
 
-        for current_model in candidate_models:
-            # Try up to 2 attempts per candidate with backoff on 503
-            max_attempts = 2
-            for attempt in range(max_attempts):
-                logger.info(
-                    "Connecting to Gemini Live API with model=%s, voice=%s (attempt %d/%d)",
-                    current_model, voice, attempt + 1, max_attempts
-                )
-                try:
-                    self._session_context = self._client.aio.live.connect(
-                        model=current_model,
-                        config=live_config
+        for api_version in candidate_api_versions:
+            logger.info("Configuring GenAI client with api_version=%s", api_version)
+            client = genai.Client(
+                api_key=self.api_key,
+                http_options=types.HttpOptions(api_version=api_version)
+            )
+
+            for current_model in candidate_models:
+                # Try up to 2 attempts per candidate with backoff on 503
+                max_attempts = 2
+                for attempt in range(max_attempts):
+                    logger.info(
+                        "Connecting to Gemini Live API with model=%s (api_version=%s, voice=%s, attempt %d/%d)",
+                        current_model, api_version, voice, attempt + 1, max_attempts
                     )
-                    self._session = await self._session_context.__aenter__()
-                    self._is_connected = True
-                    self.model_id = current_model
-                    logger.info("Connected successfully to Gemini Live session with model=%s", current_model)
+                    try:
+                        self._session_context = client.aio.live.connect(
+                            model=current_model,
+                            config=live_config
+                        )
+                        self._session = await self._session_context.__aenter__()
+                        self._client = client
+                        self._is_connected = True
+                        self.model_id = current_model
+                        logger.info(
+                            "Connected successfully to Gemini Live session with model=%s (api_version=%s)",
+                            current_model, api_version
+                        )
 
-                    # Spawn background listener for incoming model messages
-                    self._receive_task = asyncio.create_task(self._receive_loop())
+                        # Spawn background listener for incoming model messages
+                        self._receive_task = asyncio.create_task(self._receive_loop())
 
-                    # Put connected signal
-                    await self._event_queue.put(
-                        ModelEvent(type=ModelEventType.CONNECTED, turn_id=self._current_turn_id)
-                    )
-                    return  # Successfully connected!
+                        # Put connected signal
+                        await self._event_queue.put(
+                            ModelEvent(type=ModelEventType.CONNECTED, turn_id=self._current_turn_id)
+                        )
+                        return  # Successfully connected!
 
-                except Exception as e:
-                    last_error = e
-                    err_str = str(e)
-                    is_transient = "503" in err_str or "UNAVAILABLE" in err_str or "high demand" in err_str or "429" in err_str
+                    except Exception as e:
+                        last_error = e
+                        err_str = str(e)
+                        is_transient = "503" in err_str or "UNAVAILABLE" in err_str or "high demand" in err_str or "429" in err_str
+                        is_not_found = "404" in err_str or "Not Found" in err_str
 
-                    logger.warning(
-                        "Connection attempt to model %s failed (transient=%s): %s%s",
-                        current_model, is_transient, err_str, _upstream_rejection_details(e)
-                    )
+                        logger.warning(
+                            "Connection attempt to model %s (api_version=%s) failed (transient=%s, not_found=%s): %s%s",
+                            current_model, api_version, is_transient, is_not_found, err_str, _upstream_rejection_details(e)
+                        )
 
-                    if self._session_context:
-                        try:
-                            await self._session_context.__aexit__(None, None, None)
-                        except Exception:
-                            pass
-                        self._session = None
-                        self._session_context = None
+                        if self._session_context:
+                            try:
+                                await self._session_context.__aexit__(None, None, None)
+                            except Exception:
+                                pass
+                            self._session = None
+                            self._session_context = None
 
-                    if is_transient and attempt + 1 < max_attempts:
-                        backoff = 0.8 * (attempt + 1)
-                        logger.info("Backing off for %.2fs before retrying %s...", backoff, current_model)
-                        await asyncio.sleep(backoff)
-                    else:
-                        break  # Move to next candidate model
+                        if is_transient and attempt + 1 < max_attempts:
+                            backoff = 0.8 * (attempt + 1)
+                            logger.info("Backing off for %.2fs before retrying %s...", backoff, current_model)
+                            await asyncio.sleep(backoff)
+                        else:
+                            break  # Move to next candidate model
 
         # If all candidates and retries failed
         self._is_connected = False
@@ -174,6 +194,14 @@ class GeminiLiveProvider(LiveModelProvider):
                 "Please wait 5-10 seconds and click Connect again."
             )
             logger.error("All Live API models exhausted due to high Google capacity demand: %s", err_msg)
+            raise RuntimeError(friendly_msg) from last_error
+        elif "404" in err_msg or "Not Found" in err_msg:
+            friendly_msg = (
+                "Gemini Live API rejected the WebSocket connection (HTTP 404). "
+                f"Attempted models {candidate_models} on API versions {candidate_api_versions}. "
+                "Please verify that your GEMINI_API_KEY has access to the Gemini Live API in Google AI Studio."
+            )
+            logger.error("All Gemini Live candidates rejected with 404: %s", err_msg)
             raise RuntimeError(friendly_msg) from last_error
         else:
             logger.error("Failed to connect to any Gemini Live candidate: %s", err_msg, exc_info=True)

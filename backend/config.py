@@ -67,6 +67,7 @@ class Settings(BaseSettings):
     # Gemini API Settings
     gemini_api_key: Optional[str] = Field(default="", validation_alias="GEMINI_API_KEY")
     gemini_model: str = Field(default="gemini-3.8-live", validation_alias="GEMINI_MODEL")
+    gemini_api_version: str = Field(default="v1beta", validation_alias="GEMINI_API_VERSION")
     voice_name: str = Field(default="Puck", validation_alias="VOICE_NAME")
 
     # Server Settings

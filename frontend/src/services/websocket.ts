@@ -53,7 +53,7 @@ export class WebSocketClient {
   public connect(customUrl?: string): Promise<void> {
     if (customUrl) {
       this.url = customUrl;
-    } else if (!this.url) {
+    } else {
       this.url = getDefaultWebSocketUrl();
     }
 
@@ -79,13 +79,14 @@ export class WebSocketClient {
           }
         };
 
-        this.ws.onerror = (err) => {
+        this.ws.onerror = (err: any) => {
           console.error('WebSocket connection error:', err);
+          const errorMsg = err?.message || 'WebSocket connection encountered an error.';
           this.emit({
             type: 'session.error',
-            payload: { code: 'WS_ERROR', message: 'WebSocket connection encountered an error.', recoverable: true }
+            payload: { code: 'WS_ERROR', message: errorMsg, recoverable: true }
           });
-          reject(err);
+          reject(new Error(errorMsg));
         };
 
         this.ws.onclose = (closeEvent) => {

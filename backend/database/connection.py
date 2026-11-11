@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from backend.config import settings
@@ -17,12 +18,16 @@ async def check_database() -> bool:
         return False
     try:
         from sqlalchemy import text
-        async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
+
+        async def _ping():
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+
+        await asyncio.wait_for(_ping(), timeout=2.0)
         database_ready = True
     except Exception:
         database_ready = False
-        logger.exception("Database readiness check failed")
+        logger.warning("Database readiness check failed or timed out; degraded mode active")
     return database_ready
 
 

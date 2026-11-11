@@ -26,6 +26,7 @@ router = APIRouter()
 
 
 @router.websocket("/ws/live")
+@router.websocket("/ws/live/")
 async def websocket_live_endpoint(websocket: WebSocket):
     """
     Bidirectional WebSocket endpoint for real-time voice and text agent conversation.

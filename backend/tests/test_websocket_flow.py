@@ -12,7 +12,7 @@ def test_health_endpoint():
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "healthy"
-    assert data["model"] == "gemini-3.8-live"
+    assert data["model"] == settings.gemini_model
     assert data["audio_input_rate"] == 16000
     assert data["audio_output_rate"] == 24000
 

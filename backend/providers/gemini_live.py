@@ -49,6 +49,19 @@ def build_live_connect_config(system_instruction: str, voice_name: Optional[str]
         system_instruction=types.Content(
             parts=[types.Part.from_text(text=system_instruction)]
         ),
+        safety_settings=[
+            types.SafetySetting(
+                category=category,
+                threshold=types.HarmBlockThreshold.BLOCK_LOW_AND_ABOVE,
+            )
+            for category in (
+                types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                types.HarmCategory.HARM_CATEGORY_JAILBREAK,
+            )
+        ],
         input_audio_transcription=types.AudioTranscriptionConfig(),
         output_audio_transcription=types.AudioTranscriptionConfig(),
     )

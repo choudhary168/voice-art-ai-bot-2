@@ -4,7 +4,13 @@ import time
 import uuid
 from typing import Callable, Coroutine, Optional
 from backend.config import DEFAULT_LIVE_VOICE, SAFETY_SCOPE_POLICY, resolve_live_voice_name, settings
-from backend.core.guardrails import REFUSAL, screen_user_text
+from backend.core.guardrails import (
+    ANIMAL_REFUSAL,
+    REFUSAL,
+    contains_animal_noises,
+    get_refusal_for_text,
+    screen_user_text,
+)
 from backend.providers.base import LiveModelProvider, ModelEvent, ModelEventType
 from backend.schemas.events import (
     AudioChunkPayload,
@@ -51,6 +57,7 @@ class SessionOrchestrator:
         self.is_active: bool = False
         self.response_started: bool = False
         self._initial_greeting_started: bool = False
+        self._suppress_current_turn_audio: bool = False
 
         # Monotonic latency tracking
         self.metrics = LatencyMetrics()
@@ -182,10 +189,11 @@ class SessionOrchestrator:
 
         if screen_user_text(text_payload.text):
             self.current_turn_id = str(uuid.uuid4())
+            refusal_text = get_refusal_for_text(text_payload.text)
             await self.send_to_client(ServerEvent.response_started(turn_id=self.current_turn_id))
             await self.send_to_client(
                 ServerEvent.transcript_output(
-                    text=REFUSAL, turn_id=self.current_turn_id, is_final=True
+                    text=refusal_text, turn_id=self.current_turn_id, is_final=True
                 )
             )
             self.metrics.turn_completed = time.time()
@@ -267,6 +275,7 @@ class SessionOrchestrator:
                     self.current_turn_id = event.turn_id or str(uuid.uuid4())
                     self.audio_seq = 0
                     self.response_started = False
+                    self._suppress_current_turn_audio = False
 
                 elif event.type == ModelEventType.TRANSCRIPT_INPUT:
                     if self.metrics.first_input_transcription is None:
@@ -274,13 +283,70 @@ class SessionOrchestrator:
                     await self.send_to_client(
                         ServerEvent.transcript_input(text=event.text or "", is_final=event.is_final)
                     )
-                    if event.is_final and (event.text or "").strip() and getattr(self, "persistence_conversation_id", None):
-                        from backend.services.persistence import persistence_queue
-                        persistence_queue.enqueue("message", conversation_id=self.persistence_conversation_id,
-                                                  user_id=self.persistence_user_id, role="user", content=event.text,
-                                                  turn_id=event.turn_id or self.current_turn_id, is_final=True)
+                    if event.is_final and (event.text or "").strip():
+                        if screen_user_text(event.text):
+                            logger.info("Voice input screened by guardrail: %s", event.text)
+                            self._suppress_current_turn_audio = True
+                            await self.provider.interrupt()
+                            self.current_turn_id = str(uuid.uuid4())
+                            refusal_text = get_refusal_for_text(event.text)
+                            await self.send_to_client(ServerEvent.response_started(turn_id=self.current_turn_id))
+                            await self.send_to_client(
+                                ServerEvent.transcript_output(
+                                    text=refusal_text,
+                                    turn_id=self.current_turn_id,
+                                    is_final=True
+                                )
+                            )
+                            self.metrics.turn_completed = time.time()
+                            await self.send_to_client(
+                                ServerEvent.response_completed(
+                                    turn_id=self.current_turn_id,
+                                    metrics=self.metrics
+                                )
+                            )
+                            self.response_started = False
+                            self.audio_seq = 0
+                            self._suppress_current_turn_audio = False
+                            self.current_turn_id = str(uuid.uuid4())
+                            continue
+
+                        if getattr(self, "persistence_conversation_id", None):
+                            from backend.services.persistence import persistence_queue
+                            persistence_queue.enqueue("message", conversation_id=self.persistence_conversation_id,
+                                                      user_id=self.persistence_user_id, role="user", content=event.text,
+                                                      turn_id=event.turn_id or self.current_turn_id, is_final=True)
 
                 elif event.type == ModelEventType.TRANSCRIPT_OUTPUT:
+                    if contains_animal_noises(event.text or ""):
+                        logger.warning("Animal noise detected in model output, suppressing: %s", event.text)
+                        self._suppress_current_turn_audio = True
+                        await self.provider.interrupt()
+                        self.current_turn_id = str(uuid.uuid4())
+                        await self.send_to_client(ServerEvent.response_started(turn_id=self.current_turn_id))
+                        await self.send_to_client(
+                            ServerEvent.transcript_output(
+                                text=ANIMAL_REFUSAL,
+                                turn_id=self.current_turn_id,
+                                is_final=True
+                            )
+                        )
+                        self.metrics.turn_completed = time.time()
+                        await self.send_to_client(
+                            ServerEvent.response_completed(
+                                turn_id=self.current_turn_id,
+                                metrics=self.metrics
+                            )
+                        )
+                        self.response_started = False
+                        self.audio_seq = 0
+                        self._suppress_current_turn_audio = False
+                        self.current_turn_id = str(uuid.uuid4())
+                        continue
+
+                    if self._suppress_current_turn_audio:
+                        continue
+
                     if not self.response_started:
                         self.response_started = True
                         self.current_turn_id = event.turn_id or self.current_turn_id
@@ -309,6 +375,9 @@ class SessionOrchestrator:
                                                   turn_id=self.current_turn_id, is_final=True)
 
                 elif event.type == ModelEventType.AUDIO_CHUNK:
+                    if self._suppress_current_turn_audio:
+                        continue
+
                     if not self.response_started:
                         self.response_started = True
                         self.current_turn_id = event.turn_id or self.current_turn_id
@@ -336,6 +405,7 @@ class SessionOrchestrator:
                         )
 
                 elif event.type == ModelEventType.TURN_COMPLETE:
+                    self._suppress_current_turn_audio = False
                     self.metrics.turn_completed = now
                     if self.metrics.first_input_sent:
                         self.metrics.total_turn_duration_ms = round(
